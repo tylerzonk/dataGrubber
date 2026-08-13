@@ -90,11 +90,6 @@ def fix_session():
                   "browser; enter the SMS code and tick \"don't ask again "
                   "for 30 days\".")
             headful = True
-        elif status == "no_password_box":
-            raise SystemExit(
-                "  Login page rejected the username (see "
-                "debug/no-password-box.png). If the username changed, run "
-                "`python secrets_store.py` and use the full email form.")
         else:  # stuck
             if headful:
                 raise SystemExit(f"  Login still stuck ({detail}) — see "
@@ -135,8 +130,11 @@ def publish(cfg):
                 continue
             dst = dst_dir / src.relative_to(src_dir)
             # copy when new, or when the source item changed after the vault
-            # copy (a vault file you edited more recently is left alone)
-            if dst.exists() and src.stat().st_mtime <= dst.stat().st_mtime + 1:
+            # copy (a vault file you edited more recently is left alone);
+            # a re-render that produced identical bytes is not a change
+            if dst.exists() and (
+                    src.stat().st_mtime <= dst.stat().st_mtime + 1
+                    or src.read_bytes() == dst.read_bytes()):
                 skipped += 1
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)

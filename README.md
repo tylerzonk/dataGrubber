@@ -5,13 +5,59 @@ Archives each week's UMGC D2L (Brightspace) course material to local folders:
 ```
 output/
   ARIN 440/
-    Week 5/
-      course_content/   topic files, pages as markdown, links.md
-      assignments/      <name>/assignment.md + rubric + attachments + raw.json
-      quizzes/          <name>.md + raw.json
+    Content/                     the course content area, mirrored in its
+                                 own nested module structure (Module 1/
+                                 Week 1/...); pages as markdown, files
+                                 as-is, links.md for external resources,
+                                 toc.json for the raw tree
+    Activities and Assessments/
+      Week 5/
+        assignments/             <name>/assignment.md + rubric + attachments
+        quizzes/                 <name>.md + raw.json
+        discussions/             <name>.md + raw.json
+      General/                   items no week links to (Introductions, ...)
+    Class Data/                  semester-wide views
+      Grades/                    Grades.md: points, % of the 1000-point
+                                 course, your scores, earned/ungraded totals
+      Announcements/             <date> <title>.md (week noted inside)
+      Calendar.md                every due date from the activities
+                                 themselves, merged with the course
+                                 calendar and deduped
   ARIN 460/
     ...
 ```
+
+Content deliberately keeps the course's own nesting instead of being split
+by week — module 1 material stays browsable while you work later weeks.
+Every assignment/quiz/discussion file lists its points and its share of
+the final grade next to its due date.
+
+## Which classes get grabbed
+
+`config.json` is the only thing you touch between semesters:
+
+```json
+{
+  "courses": ["ARIN 440", "ARIN 460"]
+}
+```
+
+One entry per class; any fragment of the course's name or code works
+("ARIN 440", "DATA 300", ...). Each entry is matched against your live
+D2L enrollments at run time, so nothing else is hardcoded. If a code
+matches offerings from more than one semester (a retake, an old
+enrollment still listed), the currently accessible / newest one wins.
+
+New semester = replace the `courses` list and run `python pipeline.py`.
+Old course folders in `output/` are left untouched.
+
+Each course's week-1 Wednesday (which drives the week numbers on
+announcements and Calendar.md) is derived per course from your
+enrollment's start date — UMGC weeks run Wed→Tue, so the start date is
+snapped forward to the next Wednesday. That also handles 8-week and 16-week sessions
+starting on different dates. An optional `"week1_start": "YYYY-MM-DD"` in
+config overrides the derivation for every course if it ever guesses wrong
+(the run prints the date it used per course).
 
 ## Setup (venv already created by Claude; recreate with virtualenv if needed)
 
@@ -76,7 +122,20 @@ scripts still run standalone: `grab_week.py`, `refresh_cookies.py`,
   products). With valid session cookies, plain GETs return JSON.
 - Course content comes from `/content/toc`, files from
   `/content/topics/{id}/file`, assignments from `/dropbox/folders/`
-  (instructions, rubric, attachments), quizzes from `/quizzes/`.
+  (instructions, rubric, attachments), quizzes from `/quizzes/`, the
+  gradebook from `/grades/` + `/grades/categories/` +
+  `/grades/values/myGradeValues/`.
+- Every UMGC course is graded out of 1000 points, so an item's share of
+  the final grade is its points / 1000 (a 60-point assignment is 6%) —
+  immune to the gradebook only showing released items early in the term.
+  If a course ever used weighted categories instead, D2L's own weight
+  numbers win. Override the total with `"course_total_points"` in config.
+- Calendar.md trusts the activities' own due dates first (teachers forget
+  to put things in the calendar); calendar-only events are merged in and
+  duplicates dropped.
+- The archiver rebuilds a course folder from scratch when the output
+  layout version changes; after such a rebuild, delete the course's old
+  folders from the Obsidian vault once (publish never deletes).
 - External resources (publisher e-books, videos hosted off-D2L) are recorded
   in `course_content/links.md` rather than downloaded.
 

@@ -100,13 +100,22 @@ class D2LClient:
             bookmark = page["PagingInfo"]["Bookmark"]
 
     def find_course(self, name_fragment):
+        """Best enrollment matching the fragment. A course code can match
+        offerings from several semesters (retakes, old enrollments that stay
+        listed); prefer ones you can currently access, then the newest."""
         frag = name_fragment.lower().replace(" ", "")
+        matches = []
         for e in self.my_courses():
             ou = e["OrgUnit"]
             hay = (ou["Name"] + ou.get("Code", "")).lower().replace(" ", "")
             if frag in hay:
-                return ou  # {"Id": orgUnitId, "Name": ..., "Code": ...}
-        raise LookupError(f"No enrolled course matching {name_fragment!r}")
+                access = e.get("Access") or {}
+                matches.append(
+                    (bool(access.get("CanAccess", True)), ou["Id"],
+                     dict(ou, Access=access)))  # Access carries StartDate
+        if not matches:
+            raise LookupError(f"No enrolled course matching {name_fragment!r}")
+        return max(matches, key=lambda m: m[:2])[2]  # {"Id":..., "Name":..., "Code":..., "Access":...}
 
     # ---------- content / assignments / quizzes ----------
 
@@ -156,6 +165,49 @@ class D2LClient:
             r = self.s.post(action, data=data)
             r.raise_for_status()
         return r
+
+    # ---------- grades ----------
+
+    def grade_objects(self, org_unit_id):
+        """All grade items the student can see (name, MaxPoints, ...)."""
+        return self.get_json(f"/d2l/api/le/{self.le_ver}/{org_unit_id}/grades/")
+
+    def grade_categories(self, org_unit_id):
+        """Grade categories; each carries its Weight and its Grades list."""
+        return self.get_json(
+            f"/d2l/api/le/{self.le_ver}/{org_unit_id}/grades/categories/")
+
+    def my_grade_values(self, org_unit_id):
+        """My released scores per grade item (points + weighted contribution)."""
+        data = self.get_json(
+            f"/d2l/api/le/{self.le_ver}/{org_unit_id}/grades/values/myGradeValues/")
+        if isinstance(data, dict):  # newer versions page this
+            items = data.get("Objects", data.get("Items", []))
+            nxt = data.get("Next")
+            while nxt:
+                page = self.get_json(nxt.replace(self.base, ""))
+                items += page.get("Objects", page.get("Items", []))
+                nxt = page.get("Next")
+            return items
+        return data
+
+    def calendar_events(self, org_unit_id, start_iso, end_iso):
+        """Course calendar events; the API requires an explicit window."""
+        data = self.get_json(
+            f"/d2l/api/le/{self.le_ver}/{org_unit_id}/calendar/events/"
+            f"?startDateTime={start_iso}&endDateTime={end_iso}")
+        if isinstance(data, dict):
+            return data.get("Objects", data.get("Items", []))
+        return data
+
+    def my_final_grade(self, org_unit_id):
+        """Calculated/adjusted final grade, or None if not released."""
+        try:
+            return self.get_json(
+                f"/d2l/api/le/{self.le_ver}/{org_unit_id}"
+                "/grades/final/values/myGradeValue")
+        except Exception:
+            return None
 
     def quizzes(self, org_unit_id):
         items, url = [], f"/d2l/api/le/{self.le_ver}/{org_unit_id}/quizzes/"
