@@ -1,5 +1,11 @@
 {
-  "_note": "courses: one entry per class you want grabbed (these are examples) — any fragment of the course's name or code works; it is matched against your live D2L enrollments. publish_dir: optional chosen destination for the mirrored archive (e.g. an Obsidian vault); leave \"\" to use the default, Documents/dataGrubber in your home folder.",
+  "_help": [
+    "Copy this file to config.json (or just run pipeline.py once - it does the copy for you), then edit the values below.",
+    "courses: one entry per class you want grabbed (the two here are examples - replace them with yours). Any fragment of the course's name or code works; it is matched against your live D2L enrollments, so a new semester just means replacing this list.",
+    "output_dir: the master archive, kept in this folder next to the scripts. Every run updates it in place, only fetching what is new or changed.",
+    "publish_dir: a second, browse-friendly mirror of the archive (e.g. an Obsidian vault). Leave it \"\" to mirror into Documents/dataGrubber in your home folder; set a full path to choose your own destination.",
+    "request_delay_seconds: politeness delay between API calls."
+  ],
   "base_url": "https://learn.umgc.edu",
   "courses": [
     "ARIN 440",
