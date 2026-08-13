@@ -1,4 +1,5 @@
 {
+  "_note": "courses: one entry per class you want grabbed (these are examples) — any fragment of the course's name or code works; it is matched against your live D2L enrollments. publish_dir: optional chosen destination for the mirrored archive (e.g. an Obsidian vault); leave \"\" to use the default, Documents/dataGrubber in your home folder.",
   "base_url": "https://learn.umgc.edu",
   "courses": [
     "ARIN 440",
@@ -6,5 +7,5 @@
   ],
   "output_dir": "output",
   "request_delay_seconds": 0.5,
-  "publish_dir": "C:/Users/YOU/Documents/Obsidian/School/UMGC"
+  "publish_dir": ""
 }

@@ -106,10 +106,12 @@ python pipeline.py             # everything, incrementally
 python pipeline.py --week 3    # just week 3
 ```
 
-The final stage publishes the archive into the Obsidian vault
-(`publish_dir` in config, course folders without spaces: `ARIN440`).
-Only new/updated files are copied; a file you edited in the vault stays
-untouched unless the underlying course item changed after your edit.
+The final stage mirrors the archive to your chosen `publish_dir` from
+config (e.g. an Obsidian vault; course folders without spaces:
+`ARIN440`). Leave `publish_dir` empty and it defaults to
+`Documents/dataGrubber` in your home folder. Only new/updated files are
+copied; a file you edited in the destination stays untouched unless the
+underlying course item changed after your edit.
 
 Only two things ever need you: the monthly SMS MFA code (a browser window
 opens for it) and typing a new password after a rotation. The underlying

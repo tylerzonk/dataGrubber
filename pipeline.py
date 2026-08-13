@@ -101,10 +101,12 @@ def fix_session():
 
 
 def resolve_publish_dir(cfg):
-    """publish_dir from config, translated for WSL if it is a Windows path."""
+    """Where to mirror the archive: the config's publish_dir if one is
+    set (e.g. an Obsidian vault), else Documents/dataGrubber in the home
+    folder. Windows paths are translated when running under WSL."""
     raw = cfg.get("publish_dir")
     if not raw:
-        return None
+        return Path.home() / "Documents" / "dataGrubber"
     if os.name != "nt" and re.match(r"^[A-Za-z]:[/\\]", raw):
         return Path(f"/mnt/{raw[0].lower()}/{raw[2:].replace(chr(92), '/').lstrip('/')}")
     return Path(raw)
@@ -112,11 +114,9 @@ def resolve_publish_dir(cfg):
 
 def publish(cfg):
     dest_root = resolve_publish_dir(cfg)
-    if dest_root is None:
-        print("  no publish_dir configured -> skipping")
-        return
-    if not dest_root.parent.exists():
-        # e.g. running on a server where the Obsidian vault doesn't exist
+    if cfg.get("publish_dir") and not dest_root.parent.exists():
+        # a chosen destination that isn't there (e.g. running on a server
+        # where the Obsidian vault doesn't exist) -> don't invent it
         print(f"  publish_dir parent missing ({dest_root.parent}) -> skipping")
         return
     out_root = Path(cfg.get("output_dir", "output"))
