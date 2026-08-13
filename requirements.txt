@@ -1,0 +1,6 @@
+requests>=2.32
+beautifulsoup4>=4.12
+html2text>=2024.2.26
+keyring>=25
+# optional, for automatic SSO cookie refresh:
+# playwright

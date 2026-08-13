@@ -1,0 +1,9 @@
+config.json
+cookies.json
+output/
+debug/
+.pw-profile/
+__pycache__/
+*.pyc
+.venv/
+.claude/settings.local.json

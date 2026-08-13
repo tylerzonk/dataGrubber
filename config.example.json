@@ -1,0 +1,11 @@
+{
+  "base_url": "https://learn.umgc.edu",
+  "courses": [
+    "ARIN 440",
+    "ARIN 460"
+  ],
+  "week1_start": "2026-08-12",
+  "output_dir": "output",
+  "request_delay_seconds": 0.5,
+  "publish_dir": "C:/Users/YOU/Documents/Obsidian/School/UMGC"
+}
