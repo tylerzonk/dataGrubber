@@ -50,6 +50,15 @@ import html2text
 from d2l_client import D2LClient
 
 WEEK_PAT = re.compile(r"\b(?:week|unit)\s*0?(\d+)\b", re.I)
+ANCHOR_PAT = re.compile(r'<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
+
+# linked resources are only grabbed from inside the UMGC environment;
+# external links (publishers, YouTube, umgc.edu marketing pages) stay links
+UMGC_HOSTS = ("learn.umgc.edu", "leocontent.umgc.edu")
+# document types worth pulling from a linked page's own links (depth 1)
+ASSET_EXTS = (".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+              ".csv", ".txt", ".rtf", ".zip", ".ipynb", ".py", ".r",
+              ".sql", ".json")
 LAYOUT = 2  # bump when the output tree changes shape -> forces a rebuild
 
 # UMGC runs on US Eastern time: a "Tue 11:59 PM" due date is stored as
@@ -68,6 +77,14 @@ def to_md(html, baseurl=""):
     return h.handle(html or "").strip()
 
 
+def relink(md, url_map):
+    """Point markdown links whose targets were saved locally (by
+    save_linked_pages) at the local copies instead of the web."""
+    for url, local in url_map.items():
+        md = md.replace(f"]({url})", f"]({local})")
+    return md
+
+
 def safe(name):
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
 
@@ -79,12 +96,14 @@ def parse_d2l_date(s):
 
 
 # live counters that tick as classmates submit/post; they never affect the
-# rendered files, so changes to them must not count as "item updated"
+# rendered files, so changes to them must not count as "item updated".
+# IsRead/CanRate are per-viewer state on discussion posts: they flip when
+# YOU read a post, which must not look like the post changed.
 VOLATILE = {"TotalFiles", "TotalUsers", "TotalUsersWithFeedback",
             "TotalUsersWithSubmissions", "UnreadFiles", "FlaggedFiles",
             "RatingsCount", "RatingsSum", "ScoredCount",
             "UnapprovedPostCount", "PinnedPostCount", "LastPostDate",
-            "NumThreads", "NumPosts", "LastAccessed"}
+            "NumThreads", "NumPosts", "LastAccessed", "IsRead", "CanRate"}
 
 
 def fingerprint(obj):
@@ -125,6 +144,7 @@ def grade_slim(gi):
 class CourseArchiver:
     def __init__(self, client, label, org_unit, out_root, week1, only_week=None):
         self.c = client
+        self.label = label
         self.ou = org_unit
         self.only_week = only_week
         self.week1 = week1  # date of this course's week-1 Wednesday, or None
@@ -176,7 +196,12 @@ class CourseArchiver:
         """Fetch the gradebook and precompute each item's share of the
         final grade, for Grades.md and the per-item metadata lines."""
         self.grades, self.grades_by_name, self.gradebook = {}, {}, None
+        # UMGC standard is 1000 points per course, but an instructor can
+        # deviate (ARIN 440 fall 2026 grades out of 100); the config value
+        # may be a number for all courses or a {course label: total} map
         course_total = self.c.cfg.get("course_total_points", 1000)
+        if isinstance(course_total, dict):
+            course_total = course_total.get(self.label, 1000)
         try:
             objects = [g for g in self.c.grade_objects(self.ou)
                        if g.get("GradeType") != "Category"]
@@ -395,6 +420,76 @@ class CourseArchiver:
 
     # ---------- per-item savers ----------
 
+    def save_linked_pages(self, html, dest, prefix="", base_url=None,
+                          assets_only=False):
+        """Teachers link out to resources that live inside the UMGC
+        environment: LTI quickLinks and leocontent.umgc.edu pages carrying
+        the real instructions, plus documents (pdf/docx/ipynb/...) on
+        leocontent or learn. Fetch each such link and save it beside the
+        item — pages as markdown, documents as files. A fetched page gets
+        one more pass for its own document links (assets_only), so an
+        instructions page's PDFs come along without crawling site nav.
+        Returns (md note lines, saved paths, {url: local name} for relink).
+        """
+        import html as htmllib
+        from urllib.parse import urljoin, urlparse, quote, unquote
+        notes, paths, seen, url_map = [], [], set(), {}
+        for href, text in ANCHOR_PAT.findall(html or ""):
+            url = urljoin(base_url or self.c.base + "/",
+                          htmllib.unescape(href))
+            if url in seen:
+                continue
+            seen.add(url)
+            if urlparse(url).netloc.lower() not in UMGC_HOSTS:
+                continue
+            low = url.lower()
+            is_lti = "quicklink" in low and "type=lti" in low
+            if "quicklink" in low and not is_lti:
+                continue  # dropbox/quiz/discussion/content: archived already
+            if "/discussions/topics/" in low or "/dropbox/" in low.split("?")[0]:
+                continue  # direct links to activities we archive elsewhere
+            if assets_only and not (not is_lti and
+                                    low.split("?")[0].endswith(ASSET_EXTS)):
+                continue  # depth 1: documents only, never follow more pages
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text)).strip()
+            title = safe(title) or "Linked page"
+            try:
+                r = self.c.follow_lti(url) if is_lti else self.c.get_raw(url)
+            except Exception as e:
+                print(f"      linked resource {title} failed: {e}")
+                self.stats["failed"] += 1
+                notes.append(f"- Linked resource could not be fetched: "
+                             f"{title} ({url})")
+                continue
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype.startswith("image/"):
+                continue  # decorative banners; images stay as inline links
+            dest.mkdir(parents=True, exist_ok=True)
+            if "html" in ctype:
+                p = dest / f"{prefix}{title}.md"
+                sub_notes, sub_paths, sub_map = ([], [], {}) if assets_only \
+                    else self.save_linked_pages(r.text, dest, prefix,
+                                                base_url=r.url,
+                                                assets_only=True)
+                p.write_text(
+                    f"# {title}\n\nSource: {r.url}\n\n"
+                    f"{relink(to_md(r.text, baseurl=r.url), sub_map)}\n"
+                    + ("\n" + "\n".join(sub_notes) + "\n" if sub_notes else ""),
+                    encoding="utf-8")
+                notes.append(f"- Saved linked page: [{title}]({quote(p.name)})")
+                paths += [p] + sub_paths
+            else:
+                fname = safe(Path(unquote(urlparse(r.url).path)).name) or title
+                p = dest / fname
+                p.write_bytes(r.content)
+                notes.append(f"- Saved linked file: [{title}]({quote(p.name)})")
+                paths.append(p)
+            # both the raw href and its absolute form can appear in the
+            # rendered markdown, depending on whether to_md got a baseurl
+            url_map[url] = url_map[htmllib.unescape(href)] = quote(p.name)
+            print(f"      linked resource: {p.name[:70]}")
+        return notes, paths, url_map
+
     def save_assignment(self, folder, dest):
         gi = self.grade_for(folder.get("GradeItemId"), folder.get("Name"))
         key, fp = f"dropbox:{folder['Id']}", fingerprint([folder, grade_slim(gi)])
@@ -412,13 +507,16 @@ class CourseArchiver:
         if pts:
             lines.append(f"- Points: {pts}")
         lines += self.grade_lines(gi, have_points=bool(pts))
-        lines += ["", "## Instructions", "",
-                  to_md((folder.get("CustomInstructions") or {}).get("Html", ""))]
+        instr = (folder.get("CustomInstructions") or {}).get("Html", "")
+        notes, linked, lmap = self.save_linked_pages(instr, adir)
+        lines += ["", "## Instructions", "", relink(to_md(instr), lmap)]
+        if notes:
+            lines += [""] + notes
         for r in (folder.get("Assessment") or {}).get("Rubrics") or []:
             lines += ["", f"## Rubric: {r.get('Name', '')}", "",
                       "```json", json.dumps(r, indent=2), "```"]
 
-        paths = [adir / "assignment.md", adir / "raw.json"]
+        paths = [adir / "assignment.md", adir / "raw.json"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
         paths[1].write_text(json.dumps(folder, indent=2), encoding="utf-8")
 
@@ -455,23 +553,29 @@ class CourseArchiver:
             lines.append(f"- Time limit: {q['TimeLimit'].get('TimeLimitValue')} min")
         desc = ((q.get("Description") or {}).get("Text") or {}).get("Html", "")
         instr = ((q.get("Instructions") or {}).get("Text") or {}).get("Html", "")
-        if desc:
-            lines += ["", "## Description", "", to_md(desc)]
-        if instr:
-            lines += ["", "## Instructions", "", to_md(instr)]
         name = safe(q["Name"])
-        paths = [dest / f"{name}.md", dest / f"{name}.raw.json"]
+        notes, linked, lmap = self.save_linked_pages(
+            desc + instr, dest, prefix=f"{name} - ")
+        if desc:
+            lines += ["", "## Description", "", relink(to_md(desc), lmap)]
+        if instr:
+            lines += ["", "## Instructions", "", relink(to_md(instr), lmap)]
+        if notes:
+            lines += [""] + notes
+        paths = [dest / f"{name}.md", dest / f"{name}.raw.json"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
         paths[1].write_text(json.dumps(q, indent=2), encoding="utf-8")
         self.record(key, fp, paths)
 
-    def save_discussion(self, forum, topic, dest):
+    def save_discussion(self, forum, topic, ddir):
+        """The topic itself, as <Name>/<Name>.md (folder-note style: the
+        folder also holds linked resources and discussion_posts/)."""
         gi = self.grade_for(topic.get("GradeItemId"), topic.get("Name"))
         key, fp = (f"discussion:{topic['TopicId']}",
                    fingerprint([topic, grade_slim(gi)]))
         if self.fresh(key, fp):
             return
-        dest.mkdir(parents=True, exist_ok=True)
+        ddir.mkdir(parents=True, exist_ok=True)
         print(f"    discussion: {topic['Name'][:60]}")
         lines = [f"# {topic['Name']}", "", f"- Forum: {forum.get('Name', '')}"]
         for label, k in [("Due", "DueDate"), ("Start", "StartDate"), ("End", "EndDate")]:
@@ -484,14 +588,148 @@ class CourseArchiver:
         if topic.get("MustPostToParticipate"):
             lines.append("- You must post before seeing others' posts")
         desc = (topic.get("Description") or {}).get("Html", "")
+        name = safe(topic["Name"])
+        notes, linked, lmap = self.save_linked_pages(desc, ddir)
         if desc:
-            lines += ["", "## Prompt", "", to_md(desc)]
+            lines += ["", "## Prompt", "", relink(to_md(desc), lmap)]
+        if notes:
+            lines += [""] + notes
         lines += ["", f"[Open in D2L]({self.c.base}/d2l/le/{self.ou}"
                       f"/discussions/topics/{topic['TopicId']}/View)"]
-        name = safe(topic["Name"])
-        paths = [dest / f"{name}.md", dest / f"{name}.raw.json"]
+        paths = [ddir / f"{name}.md", ddir / "raw.json"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
         paths[1].write_text(json.dumps(topic, indent=2), encoding="utf-8")
+        self.record(key, fp, paths)
+
+    def save_discussion_posts(self, forum, topic, ddir):
+        """Everyone's posts for a topic — one markdown per top-level post
+        with its replies nested inside, in <Name>/discussion_posts/, plus
+        a _summary.md with the ranges (word counts, replies) that show
+        what a typical post in this class looks like. Attachments are
+        downloaded to discussion_posts/attachments/. Re-rendered whenever
+        anyone posts or edits; your own reads don't count as changes."""
+        from urllib.parse import quote
+        try:
+            posts = self.c.discussion_posts(
+                self.ou, forum["ForumId"], topic["TopicId"])
+        except Exception as e:
+            print(f"    posts unavailable: {topic['Name'][:40]}: {e}")
+            return
+        posts = [p for p in posts if not p.get("IsDeleted")]
+        if not posts:
+            return
+        key, fp = f"discussionposts:{topic['TopicId']}", fingerprint(posts)
+        if self.fresh(key, fp):
+            return
+        print(f"    posts: {topic['Name'][:50]} ({len(posts)})")
+        pdir = ddir / "discussion_posts"
+        pdir.mkdir(parents=True, exist_ok=True)
+        for old in pdir.glob("*.md"):  # thread files are renamed on edits
+            old.unlink()
+
+        me = self.c.my_user_id()
+        by_id = {p["PostId"]: p for p in posts}
+        children = {}
+        for p in posts:
+            children.setdefault(p.get("ParentPostId"), []).append(p)
+        for v in children.values():
+            v.sort(key=lambda p: p.get("DatePosted") or "")
+        # top-level posts, plus orphans whose parent was deleted
+        roots = children.get(None, []) + [
+            p for p in posts
+            if p.get("ParentPostId") and p["ParentPostId"] not in by_id]
+
+        def author(p):
+            if p.get("IsAnonymous"):
+                return "Anonymous"
+            nm = p.get("PostingUserDisplayName") or "Unknown"
+            return f"{nm} (me)" if str(p.get("PostingUserId")) == me else nm
+
+        def descendants(p):
+            kids = children.get(p["PostId"], [])
+            return len(kids) + sum(descendants(k) for k in kids)
+
+        paths = []
+
+        def grab_attachments(p, lines):
+            for att in p.get("Attachments") or []:
+                fn = safe(att.get("FileName") or "file")
+                fpath = pdir / "attachments" / fn
+                if fpath.exists() and fpath in paths:  # name clash between
+                    fn = f"{p['PostId']} {fn}"        # different posts
+                    fpath = pdir / "attachments" / fn
+                try:
+                    r = self.c.get_raw(
+                        f"/d2l/api/le/{self.c.le_ver}/{self.ou}/discussions/"
+                        f"forums/{forum['ForumId']}/topics/{topic['TopicId']}"
+                        f"/posts/{p['PostId']}/attachments/{att['FileId']}")
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    fpath.write_bytes(r.content)
+                    paths.append(fpath)
+                    lines.append(f"- Attachment: [{fn}](attachments/{quote(fn)})")
+                except Exception as e:
+                    print(f"      attachment {fn} failed: {e}")
+                    self.stats["failed"] += 1
+                    lines.append(f"- Attachment (fetch failed): {fn}")
+
+        used, rows = set(), []
+        for top in roots:
+            date = parse_d2l_date(top.get("DatePosted"))
+            when = f"{date:%Y-%m-%d} " if date else ""
+            stem = safe(when + (top.get("Subject") or author(top)))[:70]
+            fname, n = f"{stem}.md", 2
+            while fname in used:
+                fname, n = f"{stem} {n}.md", n + 1
+            used.add(fname)
+            reps = descendants(top)
+            lines = [f"# {top.get('Subject') or 'Post'}", "",
+                     f"- Author: {author(top)}"]
+            if date:
+                lines.append(f"- Posted: {date:%A %Y-%m-%d %H:%M %Z}")
+            lines.append(f"- Words: {top.get('WordCount')}")
+            lines.append(f"- Replies: {reps}")
+            grab_attachments(top, lines)
+            lines += ["", to_md((top.get("Message") or {}).get("Html", ""))]
+
+            def walk(pid, depth):
+                for ch in children.get(pid, []):
+                    d = parse_d2l_date(ch.get("DatePosted"))
+                    when = f"{d:%Y-%m-%d %H:%M}" if d else "?"
+                    lines.append("")
+                    lines.append(f"{'#' * min(depth, 6)} Reply — {author(ch)}"
+                                 f" ({when}, {ch.get('WordCount')} words)")
+                    grab_attachments(ch, lines)
+                    lines.extend(
+                        ["", to_md((ch.get("Message") or {}).get("Html", ""))])
+                    walk(ch["PostId"], depth + 1)
+
+            walk(top["PostId"], 2)
+            path = pdir / fname
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            paths.append(path)
+            rows.append((date, author(top), top.get("WordCount") or 0,
+                         reps, fname))
+
+        wc = sorted(r[2] for r in rows)
+        rep_wc = sorted(p.get("WordCount") or 0 for p in posts
+                        if p.get("ParentPostId"))
+        lines = [f"# Posts summary — {topic['Name']}", "",
+                 f"- Total posts: {len(posts)} "
+                 f"({len(roots)} top-level, {len(posts) - len(roots)} replies)",
+                 f"- Top-level word counts: min {wc[0]}, "
+                 f"median {wc[len(wc) // 2]}, max {wc[-1]}"]
+        if rep_wc:
+            lines.append(f"- Reply word counts: min {rep_wc[0]}, median "
+                         f"{rep_wc[len(rep_wc) // 2]}, max {rep_wc[-1]}")
+        lines += ["", "| Posted | Author | Words | Replies | Thread |",
+                  "|---|---|---|---|---|"]
+        for date, auth, words, reps, fname in rows:
+            when = f"{date:%Y-%m-%d}" if date else ""
+            lines.append(f"| {when} | {cell(auth)} | {words} | {reps} "
+                         f"| [{cell(Path(fname).stem)}]({quote(fname)}) |")
+        spath = pdir / "_summary.md"
+        spath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        paths.append(spath)
         self.record(key, fp, paths)
 
     def save_announcement(self, item, dest, week_n=None):
@@ -510,9 +748,14 @@ class CourseArchiver:
         mod = parse_d2l_date(item.get("LastModifiedDate"))
         if mod:
             lines.append(f"- Last edited: {mod:%Y-%m-%d %H:%M}")
-        lines += ["", to_md((item.get("Body") or {}).get("Html", ""))]
+        body = (item.get("Body") or {}).get("Html", "")
         stamp = f"{posted:%Y-%m-%d} " if posted else ""
-        paths = [dest / f"{stamp}{safe(item['Title'])}.md"]
+        notes, linked, lmap = self.save_linked_pages(
+            body, dest, prefix=f"{stamp}{safe(item['Title'])} - ")
+        lines += ["", relink(to_md(body), lmap)]
+        if notes:
+            lines += [""] + notes
+        paths = [dest / f"{stamp}{safe(item['Title'])}.md"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
         for att in item.get("Attachments", []):
             p = dest / safe(att["FileName"])
@@ -549,12 +792,15 @@ class CourseArchiver:
         dest.mkdir(parents=True, exist_ok=True)
         print(f"    page: {topic['Title'][:60]}")
         path = dest / f"{safe(topic['Title'])}.md"
+        notes, linked, lmap = self.save_linked_pages(
+            r.text, dest, base_url=r.url, assets_only=True)
         path.write_text(
             f"# {topic['Title']}\n\nSource: {r.url}\n\n"
-            f"{to_md(r.text, baseurl=r.url)}\n",
+            f"{relink(to_md(r.text, baseurl=r.url), lmap)}\n"
+            + ("\n" + "\n".join(notes) + "\n" if notes else ""),
             encoding="utf-8",
         )
-        self.record(key, fp, [path])
+        self.record(key, fp, [path] + linked)
 
     def save_file_topic(self, topic, dest):
         key, fp = f"topic:{topic['TopicId']}", fingerprint(topic)
@@ -577,15 +823,43 @@ class CourseArchiver:
         fname = safe(Path(topic.get("Url") or "").name or topic["Title"])
         if fname.lower().endswith((".html", ".htm")):
             path = dest / f"{safe(topic['Title'])}.md"
+            notes, linked, lmap = self.save_linked_pages(
+                r.text, dest, base_url=r.url)
             path.write_text(
-                f"# {topic['Title']}\n\n{to_md(r.text, baseurl=r.url)}\n",
+                f"# {topic['Title']}\n\n"
+                f"{relink(to_md(r.text, baseurl=r.url), lmap)}\n"
+                + ("\n" + "\n".join(notes) + "\n" if notes else ""),
                 encoding="utf-8")
         else:
             path = dest / fname
+            linked = []
             path.write_bytes(r.content)
-        self.record(key, fp, [path])
+        self.record(key, fp, [path] + linked)
 
     # ---------- content walking ----------
+
+    def save_module_desc(self, mod, mdir):
+        """A module's own text — what D2L shows when you click the module
+        itself. Courses put real content here (reading lists, weekly to-do
+        lists, module welcome pages), sometimes with no topics at all.
+        Saved as <Module Title>.md inside the module's folder (Obsidian's
+        folder-note convention)."""
+        html = ((mod.get("Description") or {}).get("Html") or "").strip()
+        if not html:
+            return
+        key, fp = f"moduledesc:{mod['ModuleId']}", fingerprint(html)
+        if self.fresh(key, fp):
+            return
+        title = mod.get("Title", "module")
+        print(f"    module text: {title[:60]}")
+        mdir.mkdir(parents=True, exist_ok=True)
+        notes, linked, lmap = self.save_linked_pages(html, mdir)
+        p = mdir / f"{safe(title)}.md"
+        p.write_text(
+            f"# {title}\n\n{relink(to_md(html), lmap)}\n"
+            + ("\n" + "\n".join(notes) + "\n" if notes else ""),
+            encoding="utf-8")
+        self.record(key, fp, [p] + linked)
 
     def process_module(self, mod, dest, week_n=None):
         """Mirror a module into dest/<title>/, keeping the course's own
@@ -598,6 +872,8 @@ class CourseArchiver:
             return
         mdir = dest / safe(mod.get("Title", "module"))
         do_topics = not self.only_week or week_n == self.only_week
+        if do_topics:
+            self.save_module_desc(mod, mdir)
         for topic in mod.get("Topics", []) if do_topics else []:
             url = topic.get("Url") or ""
             if topic.get("TypeIdentifier") == "Link":
@@ -660,9 +936,10 @@ class CourseArchiver:
             wk = self.activity_week["discussion"].get(oid)
             if self.only_week and wk != self.only_week:
                 continue
-            self.save_discussion(
-                f, t, self.aa_dir
-                / (f"Week {wk}" if wk else "General") / "discussions")
+            ddir = (self.aa_dir / (f"Week {wk}" if wk else "General")
+                    / "discussions" / safe(t["Name"]))
+            self.save_discussion(f, t, ddir)
+            self.save_discussion_posts(f, t, ddir)
 
         print("  Class Data:")
         for item in self.c.news(self.ou):

@@ -166,6 +166,28 @@ class D2LClient:
             r.raise_for_status()
         return r
 
+    def discussion_posts(self, org_unit_id, forum_id, topic_id):
+        """Every post in a topic (classmates' included), paged if needed."""
+        path = (f"/d2l/api/le/{self.le_ver}/{org_unit_id}/discussions/forums/"
+                f"{forum_id}/topics/{topic_id}/posts/")
+        data = self.get_json(path)
+        if isinstance(data, list):
+            return data
+        items = data.get("Objects", data.get("Items", []))
+        nxt = (data.get("PagingInfo") or {}).get("Bookmark")
+        while data.get("PagingInfo", {}).get("HasMoreItems") and nxt:
+            data = self.get_json(f"{path}?bookmark={nxt}")
+            items += data.get("Objects", data.get("Items", []))
+            nxt = (data.get("PagingInfo") or {}).get("Bookmark")
+        return items
+
+    def my_user_id(self):
+        """My own D2L user id, for marking my posts in archived threads."""
+        if not getattr(self, "_my_id", None):
+            me = self.get_json(f"/d2l/api/lp/{self.lp_ver}/users/whoami")
+            self._my_id = str(me.get("Identifier"))
+        return self._my_id
+
     # ---------- grades ----------
 
     def grade_objects(self, org_unit_id):
