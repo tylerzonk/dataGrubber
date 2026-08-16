@@ -4,7 +4,13 @@
     "courses: one entry per class you want grabbed (the two here are examples - replace them with yours). Any fragment of the course's name or code works; it is matched against your live D2L enrollments, so a new semester just means replacing this list.",
     "output_dir: the master archive, kept in this folder next to the scripts. Every run updates it in place, only fetching what is new or changed.",
     "publish_dir: a second, browse-friendly mirror of the archive (e.g. an Obsidian vault). Leave it \"\" to mirror into Documents/dataGrubber in your home folder; set a full path to choose your own destination.",
-    "request_delay_seconds: politeness delay between API calls."
+    "request_delay_seconds: politeness delay between API calls.",
+    "course_total_points: what a course's grades add up to. UMGC's standard is 1000, but an instructor can deviate; use a number for all courses or a map like {\"ARIN 440\": 100} for exceptions (unlisted courses stay 1000).",
+    "ai_scrape: when true, external links (articles, videos) found in the archive become AI-digested study copies saved next to the file that linked them. Only new links are processed each run.",
+    "ai_scrape_provider: which AI does the digesting. \"claude\" (default, the optimized case): a headless Claude Code session fetches pages itself, web-searches substitutes for paywalled sources, needs the Claude Code CLI logged in once. \"openai\": any OpenAI-compatible chat endpoint - OpenAI with an API key, or a local model via Ollama/LM Studio/vLLM; dataGrubber fetches each page and the model digests it (no web-search fallback). \"command\": any other agentic CLI via ai_scrape_command.",
+    "ai_scrape_command: for \"claude\", how to launch Claude Code (leave \"\" to auto-detect on PATH or inside WSL). For \"command\", the full CLI template - {prompt} is replaced with the task, e.g. \"codex exec {prompt}\".",
+    "ai_scrape_api_base / ai_scrape_model / ai_scrape_api_key: \"openai\" provider only. Base like https://api.openai.com/v1 or http://localhost:11434/v1; the key may instead come from the AI_SCRAPE_API_KEY or OPENAI_API_KEY env var (local servers usually need none).",
+    "ai_scrape_limit: at most this many links per run, to bound cost; 0 means no cap."
   ],
   "base_url": "https://learn.umgc.edu",
   "courses": [
@@ -13,5 +19,13 @@
   ],
   "output_dir": "output",
   "request_delay_seconds": 0.5,
-  "publish_dir": ""
+  "publish_dir": "",
+  "course_total_points": 1000,
+  "ai_scrape": false,
+  "ai_scrape_provider": "claude",
+  "ai_scrape_command": "",
+  "ai_scrape_api_base": "",
+  "ai_scrape_model": "",
+  "ai_scrape_api_key": "",
+  "ai_scrape_limit": 0
 }

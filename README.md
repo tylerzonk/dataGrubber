@@ -106,6 +106,36 @@ python pipeline.py             # everything, incrementally
 python pipeline.py --week 3    # just week 3
 ```
 
+Links a teacher put inside an assignment, quiz, discussion, announcement,
+or content page are followed when they stay inside the UMGC environment
+(learn.umgc.edu, leocontent.umgc.edu): pages are saved as markdown and
+documents (pdf/docx/ipynb/...) as files, always right next to the file
+that linked them, and the markdown's own links are rewritten to point at
+the local copies.
+
+With `"ai_scrape": true` in config, external links (articles, videos)
+get the same treatment via AI: each one becomes a `<title> (web).md`
+study copy beside the linking file. The stage is model-agnostic
+(`ai_scrape_provider`):
+
+- `"claude"` (default, the optimized case) — a headless Claude Code
+  session fetches pages itself and web-searches a substitute when the
+  original is paywalled. Needs the Claude Code CLI logged in once
+  (`claude`); auto-detected on PATH or inside WSL.
+- `"openai"` — any OpenAI-compatible chat endpoint: OpenAI with an API
+  key, or a **local model** through Ollama / LM Studio / vLLM
+  (`ai_scrape_api_base`, `ai_scrape_model`, key via config or the
+  `OPENAI_API_KEY` env var). dataGrubber fetches each page and the model
+  digests it; pages the plain fetch can't reach are recorded as failed
+  rather than substituted.
+- `"command"` — any other agentic CLI: set `ai_scrape_command` to a
+  template whose `{prompt}` gets the task (e.g. `codex exec {prompt}`);
+  it runs in the destination folder and writes the files itself.
+
+Only newly appeared links are processed on later runs
+(`output/.ai_manifest.json` tracks them; delete an entry to retry a
+failure, delete a `(web).md` file to refetch it).
+
 The final stage mirrors the archive to your chosen `publish_dir` from
 config (e.g. an Obsidian vault; course folders without spaces:
 `ARIN440`). Leave `publish_dir` empty and it defaults to

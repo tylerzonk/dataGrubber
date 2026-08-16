@@ -15,7 +15,11 @@ Stages and their self-repairs:
         - password rotated        -> prompts for the new one, saves it,
                                      and retries
   3. archive -> incremental grab (new / updated / verified per course)
-  4. publish -> mirrors the archive into the Obsidian vault
+  4. ai scrape -> when config "ai_scrape" is true, hands external links
+     (articles, videos) to a headless Claude Code session that saves a
+     digestible study copy next to the file that linked them; only new
+     links are processed each run (see ai_scrape.py)
+  5. publish -> mirrors the archive into the Obsidian vault
      (config "publish_dir"); only new/updated files are copied, and a
      file you edited in the vault is never overwritten unless the source
      item itself changed after your edit.
@@ -37,7 +41,7 @@ import secrets_store
 
 
 def stage(n, label):
-    print(f"\n[{n}/4] {label}")
+    print(f"\n[{n}/5] {label}")
 
 
 def check_config():
@@ -167,7 +171,11 @@ def main():
     import grab_week
     grab_week.run(week=args.week, client=client)
 
-    stage(4, "publish")
+    stage(4, "ai scrape")
+    import ai_scrape
+    ai_scrape.run(client.cfg)
+
+    stage(5, "publish")
     publish(client.cfg)
 
 
