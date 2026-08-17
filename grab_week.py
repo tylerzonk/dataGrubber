@@ -133,6 +133,48 @@ def cell(x):
     return str(x).replace("|", "\\|")
 
 
+def rubric_md(r):
+    """A rubric as the table D2L pops up: criteria rows x level columns,
+    each cell the graded description for that level."""
+    out = []
+    desc = ((r.get("Description") or {}).get("Text") or "").strip()
+    if desc:
+        out += [desc, ""]
+    for grp in r.get("CriteriaGroups") or []:
+        levels = grp.get("Levels") or []
+        head = []
+        for lv in levels:
+            nm = lv.get("Name") or ""
+            if lv.get("Points") is not None:
+                nm += f" ({lv['Points']:g} pts)"
+            head.append(nm)
+        out.append("| Criterion | " + " | ".join(cell(h) for h in head) + " |")
+        out.append("|---" * (len(levels) + 1) + "|")
+        for cr in grp.get("Criteria") or []:
+            by_level = {c.get("LevelId"): c for c in cr.get("Cells") or []}
+            cells = []
+            for lv in levels:
+                c0 = by_level.get(lv.get("Id")) or {}
+                txt = re.sub(r"\s+", " ",
+                             ((c0.get("Description") or {}).get("Text") or "")
+                             ).strip()
+                if not txt and c0.get("Points") is not None:
+                    txt = f"{c0['Points']:g} pts"
+                cells.append(txt)
+            name = re.sub(r"\s+", " ", cr.get("Name") or "").strip()
+            out.append(f"| **{cell(name)}** | "
+                       + " | ".join(cell(x) for x in cells) + " |")
+        out.append("")
+    for ol in r.get("OverallLevels") or []:
+        txt = re.sub(r"\s+", " ",
+                     ((ol.get("Description") or {}).get("Text") or "")).strip()
+        rng = ol.get("RangeStart")
+        out.append(f"- Overall — {ol.get('Name', '')}"
+                   + (f" (from {rng:g})" if rng is not None else "")
+                   + (f": {txt}" if txt else ""))
+    return "\n".join(out).strip()
+
+
 def grade_slim(gi):
     """The grade fields shown inside item files. Scores stay out, so a
     newly posted grade rewrites Grades.md but not every assignment.md."""
@@ -513,8 +555,7 @@ class CourseArchiver:
         if notes:
             lines += [""] + notes
         for r in (folder.get("Assessment") or {}).get("Rubrics") or []:
-            lines += ["", f"## Rubric: {r.get('Name', '')}", "",
-                      "```json", json.dumps(r, indent=2), "```"]
+            lines += ["", f"## Rubric: {r.get('Name', '')}", "", rubric_md(r)]
 
         paths = [adir / "assignment.md", adir / "raw.json"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -571,8 +612,12 @@ class CourseArchiver:
         """The topic itself, as <Name>/<Name>.md (folder-note style: the
         folder also holds linked resources and discussion_posts/)."""
         gi = self.grade_for(topic.get("GradeItemId"), topic.get("Name"))
+        try:  # rubrics live behind their own route; objectType 5 = topic
+            rubrics = self.c.rubric(self.ou, 5, topic["TopicId"]) or []
+        except Exception:
+            rubrics = []
         key, fp = (f"discussion:{topic['TopicId']}",
-                   fingerprint([topic, grade_slim(gi)]))
+                   fingerprint([topic, grade_slim(gi), rubrics]))
         if self.fresh(key, fp):
             return
         ddir.mkdir(parents=True, exist_ok=True)
@@ -594,11 +639,17 @@ class CourseArchiver:
             lines += ["", "## Prompt", "", relink(to_md(desc), lmap)]
         if notes:
             lines += [""] + notes
+        for r in rubrics:
+            lines += ["", f"## Rubric: {r.get('Name', '')}", "", rubric_md(r)]
         lines += ["", f"[Open in D2L]({self.c.base}/d2l/le/{self.ou}"
                       f"/discussions/topics/{topic['TopicId']}/View)"]
         paths = [ddir / f"{name}.md", ddir / "raw.json"] + linked
         paths[0].write_text("\n".join(lines) + "\n", encoding="utf-8")
         paths[1].write_text(json.dumps(topic, indent=2), encoding="utf-8")
+        if rubrics:
+            rp = ddir / "rubric.json"
+            rp.write_text(json.dumps(rubrics, indent=2), encoding="utf-8")
+            paths.append(rp)
         self.record(key, fp, paths)
 
     def save_discussion_posts(self, forum, topic, ddir):
