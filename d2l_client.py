@@ -23,6 +23,14 @@ class D2LClient:
         self.cfg = cfg
         self.delay = cfg.get("request_delay_seconds", 0.5)
         self.s = requests.Session()
+        # UMGC pages often send text/html without a charset; requests then
+        # falls back to Latin-1 and curly quotes come out as "â€™". These
+        # pages are UTF-8, so default to that when the server doesn't say.
+        def utf8_default(r, *args, **kwargs):
+            ctype = r.headers.get("Content-Type", "").lower()
+            if ctype.startswith("text/") and "charset" not in ctype:
+                r.encoding = "utf-8"
+        self.s.hooks["response"].append(utf8_default)
         self.s.headers["User-Agent"] = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) personal-course-archiver"
         )

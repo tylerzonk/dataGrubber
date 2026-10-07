@@ -126,7 +126,8 @@ def find_claude(cfg):
         # where claude lives and call it by absolute path
         try:
             out = subprocess.run(["wsl", "-e", "bash", "-lc", "which claude"],
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=60)
             path = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
         except Exception:
             path = ""
@@ -211,7 +212,8 @@ def agent_run(provider, cfg, out_root, pending, manifest, manifest_path):
             blurb = ""
             try:
                 r = subprocess.run(cmd, cwd=folder, capture_output=True,
-                                   text=True, timeout=TIMEOUT)
+                                   text=True, encoding="utf-8",
+                                   errors="replace", timeout=TIMEOUT)
                 blurb = (r.stdout or "") + (r.stderr or "")
                 if r.returncode != 0 and re.search(
                         r"log ?in|authenticat|api key", blurb, re.I):
