@@ -46,6 +46,7 @@ import shutil
 from pathlib import Path
 
 import html2text
+import requests
 
 from d2l_client import D2LClient
 
@@ -86,7 +87,10 @@ def relink(md, url_map):
 
 
 def safe(name):
-    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
+    # Windows silently drops trailing dots and spaces from folder names, so
+    # "Please introduce yourself...." would be created without them and the
+    # write into it would fail -> strip them here
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip().rstrip(". ") or "_"
 
 
 def parse_d2l_date(s):
@@ -652,6 +656,28 @@ class CourseArchiver:
             paths.append(rp)
         self.record(key, fp, paths)
 
+    def save_forum(self, forum):
+        """The forum's own description — instructors put course-wide
+        discussion rules there (shown on the Discussions front page, not on
+        any topic) — as General/discussions/<Name> (forum instructions).md."""
+        desc = (forum.get("Description") or {}).get("Html", "") or \
+               (forum.get("Description") or {}).get("Text", "")
+        if not desc.strip():
+            return
+        key, fp = f"forum:{forum['ForumId']}", fingerprint(forum)
+        if self.fresh(key, fp):
+            return
+        fdir = self.aa_dir / "General" / "discussions"
+        fdir.mkdir(parents=True, exist_ok=True)
+        print(f"    forum instructions: {forum['Name'][:60]}")
+        lines = [f"# {forum['Name']} — forum instructions", "",
+                 "Course-wide description from the Discussions front page; "
+                 "applies to every topic in this forum.", "",
+                 to_md(desc)]
+        p = fdir / f"{safe(forum['Name'])} (forum instructions).md"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.record(key, fp, [p])
+
     def save_discussion_posts(self, forum, topic, ddir):
         """Everyone's posts for a topic — one markdown per top-level post
         with its replies nested inside, in <Name>/discussion_posts/, plus
@@ -983,6 +1009,10 @@ class CourseArchiver:
                     continue
                 saver(obj, self.aa_dir
                       / (f"Week {wk}" if wk else "General") / sub)
+        for f in self.c.get_json(
+            f"/d2l/api/le/{self.c.le_ver}/{self.ou}/discussions/forums/"
+        ):
+            self.save_forum(f)
         for oid, (f, t) in self.discussions.items():
             wk = self.activity_week["discussion"].get(oid)
             if self.only_week and wk != self.only_week:
@@ -1046,10 +1076,18 @@ def run(week=None, client=None):
                  else derive_week1(course))
         print(f"\n== {course['Name']} (orgUnitId {course['Id']}, "
               f"week 1: {week1 or 'unknown'}) ==")
-        CourseArchiver(
-            client, course_name, course["Id"], out_root,
-            week1, only_week=week,
-        ).run()
+        # a course that hasn't opened yet (D2L returns 403 until its start
+        # date) is skipped so the other courses still get grabbed
+        try:
+            CourseArchiver(
+                client, course_name, course["Id"], out_root,
+                week1, only_week=week,
+            ).run()
+        except requests.HTTPError as e:
+            if e.response is None or e.response.status_code != 403:
+                raise
+            print(f"  not open yet (403) -> skipped; rerun after "
+                  f"{(course.get('Access') or {}).get('StartDate') or 'its start date'}")
 
     print("\nDone. Output in", out_root.resolve())
 
