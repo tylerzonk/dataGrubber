@@ -93,6 +93,20 @@ def safe(name):
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip().rstrip(". ") or "_"
 
 
+def reason(e):
+    """Short, human reason for a failed fetch."""
+    if isinstance(e, str):
+        return e
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        code = resp.status_code
+        return {401: "401 not authorized", 403: "403 forbidden (no access)",
+                404: "404 not found"}.get(code, f"HTTP {code}")
+    if isinstance(e, requests.ConnectionError):
+        return "host unreachable (may need the UMGC network or a browser login)"
+    return str(e)[:120]
+
+
 def parse_d2l_date(s):
     if not s:
         return None
@@ -208,6 +222,10 @@ class CourseArchiver:
             shutil.rmtree(self.dir, ignore_errors=True)
             self.manifest = {}
         self.manifest["_layout"] = LAYOUT
+        # everything that couldn't be fetched, kept across runs (a stubbed or
+        # recorded item isn't retried, so its failure must be remembered);
+        # an entry drops off when a later run fetches it
+        self.inaccessible = self.manifest.get("_inaccessible", {})
         self.stats = {"new": 0, "updated": 0, "verified": 0, "failed": 0}
         self.links = {}       # dest dir -> list of markdown link lines
         # kind -> {activity id: week number or None}; filled from quickLinks
@@ -226,6 +244,22 @@ class CourseArchiver:
     def record(self, key, fp, paths):
         self.stats["updated" if key in self.manifest else "new"] += 1
         self.manifest[key] = {"fp": fp, "paths": [str(p) for p in paths]}
+
+    # ---------- inaccessible report ----------
+
+    def flag(self, key, where, title, url, why):
+        """Remember an item that couldn't be fetched, for Inaccessible.md."""
+        try:
+            where = Path(where).relative_to(self.dir).as_posix()
+        except ValueError:
+            where = str(where)
+        if url and url.startswith("/"):
+            url = self.c.base + url
+        self.inaccessible[key] = {"where": where, "title": title,
+                                  "url": url or "", "why": reason(why)}
+
+    def clear(self, key):
+        self.inaccessible.pop(key, None)
 
     # ---------- weeks ----------
 
@@ -504,9 +538,11 @@ class CourseArchiver:
             except Exception as e:
                 print(f"      linked resource {title} failed: {e}")
                 self.stats["failed"] += 1
+                self.flag(f"link:{dest}|{url}", dest, title, url, e)
                 notes.append(f"- Linked resource could not be fetched: "
                              f"{title} ({url})")
                 continue
+            self.clear(f"link:{dest}|{url}")
             ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype.startswith("image/"):
                 continue  # decorative banners; images stay as inline links
@@ -574,9 +610,12 @@ class CourseArchiver:
                 )
                 p.write_bytes(r.content)
                 paths.append(p)
+                self.clear(f"att:dropbox:{att['FileId']}")
             except Exception as e:
                 print(f"      attachment {att.get('FileName')} failed: {e}")
                 self.stats["failed"] += 1
+                self.flag(f"att:dropbox:{att['FileId']}", adir,
+                          att.get("FileName"), "", e)
         self.record(key, fp, paths)
 
     def save_quiz(self, q, dest):
@@ -744,9 +783,11 @@ class CourseArchiver:
                     fpath.write_bytes(r.content)
                     paths.append(fpath)
                     lines.append(f"- Attachment: [{fn}](attachments/{quote(fn)})")
+                    self.clear(f"att:post:{att['FileId']}")
                 except Exception as e:
                     print(f"      attachment {fn} failed: {e}")
                     self.stats["failed"] += 1
+                    self.flag(f"att:post:{att['FileId']}", pdir, fn, "", e)
                     lines.append(f"- Attachment (fetch failed): {fn}")
 
         used, rows = set(), []
@@ -843,14 +884,24 @@ class CourseArchiver:
                 )
                 p.write_bytes(r.content)
                 paths.append(p)
+                self.clear(f"att:news:{att['FileId']}")
             except Exception as e:
                 print(f"      attachment {att.get('FileName')} failed: {e}")
                 self.stats["failed"] += 1
+                self.flag(f"att:news:{att['FileId']}", dest,
+                          att.get("FileName"), "", e)
         self.record(key, fp, paths)
 
     def save_lti_page(self, topic, dest):
         key, fp = f"topic:{topic['TopicId']}", fingerprint(topic)
         if self.fresh(key, fp):
+            # a stub from a run before the report existed still belongs in it
+            stub = Path(self.manifest[key]["paths"][0]) \
+                if self.manifest[key]["paths"] else None
+            if key not in self.inaccessible and stub and \
+                    "could not be reached" in stub.read_text(encoding="utf-8"):
+                self.flag(key, dest, topic.get("Title"), topic["Url"],
+                          "external tool unreachable (stubbed earlier)")
             return
         try:
             r = self.c.follow_lti(topic["Url"])
@@ -858,6 +909,7 @@ class CourseArchiver:
             # Record the failure so it isn't retried every run; the topic's
             # fingerprint changing (or deleting the stub) triggers a retry.
             print(f"    LTI unreachable, stubbed: {topic.get('Title')}: {e}")
+            self.flag(key, dest, topic.get("Title"), topic["Url"], e)
             dest.mkdir(parents=True, exist_ok=True)
             stub = dest / f"{safe(topic['Title'])}.md"
             stub.write_text(
@@ -866,6 +918,7 @@ class CourseArchiver:
                 f"{self.c.base}{topic['Url']}\n", encoding="utf-8")
             self.record(key, fp, [stub])
             return
+        self.clear(key)
         dest.mkdir(parents=True, exist_ok=True)
         print(f"    page: {topic['Title'][:60]}")
         path = dest / f"{safe(topic['Title'])}.md"
@@ -886,6 +939,8 @@ class CourseArchiver:
         if topic.get("IsBroken"):
             self.links.setdefault(dest, []).append(
                 f"- {topic.get('Title')}: broken topic in the course itself")
+            self.flag(key, dest, topic.get("Title"), topic.get("Url"),
+                      "broken in the course itself (instructor's link)")
             self.record(key, fp, [])
             return
         try:
@@ -894,7 +949,9 @@ class CourseArchiver:
             self.links.setdefault(dest, []).append(
                 f"- {topic.get('Title')}: FAILED ({e})")
             self.stats["failed"] += 1
+            self.flag(key, dest, topic.get("Title"), topic.get("Url"), e)
             return
+        self.clear(key)
         dest.mkdir(parents=True, exist_ok=True)
         print(f"    file: {topic['Title'][:60]}")
         fname = safe(Path(topic.get("Url") or "").name or topic["Title"])
@@ -969,6 +1026,9 @@ class CourseArchiver:
                     else:
                         self.links.setdefault(mdir, []).append(
                             f"- {topic.get('Title')}: unresolved quickLink {url}")
+                        self.flag(f"ql:{topic['TopicId']}", mdir,
+                                  topic.get("Title"), url,
+                                  "points to an activity D2L doesn't list for you")
                 else:
                     self.links.setdefault(mdir, []).append(
                         f"- [{topic.get('Title')}]({url})")
@@ -1043,10 +1103,66 @@ class CourseArchiver:
                 p.write_text(text, encoding="utf-8")
 
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.manifest["_inaccessible"] = self.inaccessible
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2))
         s = self.stats
         print(f"  -> {s['new']} new, {s['updated']} updated, "
               f"{s['verified']} verified, {s['failed']} failed")
+
+
+def write_inaccessible(out_root, label):
+    """<Course>/Inaccessible.md: everything dataGrubber couldn't fetch for
+    this course, to open yourself in a browser logged into UMGC. Combines
+    the archive's failures (kept in .manifest.json) with the AI scrape's
+    (output/.ai_manifest.json). Returns the number of items listed."""
+    cdir = out_root / safe(label)
+    mpath = cdir / ".manifest.json"
+    if not mpath.exists():
+        return 0
+    items = json.loads(mpath.read_text()).get("_inaccessible", {})
+    rows = sorted(items.values(), key=lambda i: (i["where"], i["title"] or ""))
+    ai_path = out_root / ".ai_manifest.json"
+    ai = json.loads(ai_path.read_text()) if ai_path.exists() else {}
+    prefix = f"{safe(label)}/"
+    ext = sorted((k.split("|", 1)[0][len(prefix):] or ".", k.split("|", 1)[1])
+                 for k, v in ai.items()
+                 if v.get("status") == "failed" and k.startswith(prefix))
+
+    lines = [f"# Inaccessible — {label}", "",
+             "What dataGrubber couldn't fetch. Open these yourself in a "
+             "browser logged into UMGC. Rebuilt every run; an item drops "
+             "off once a later run gets it.", ""]
+    if not rows and not ext:
+        lines.append("Nothing inaccessible as of the last run.")
+    if rows:
+        lines += ["## Inside UMGC (D2L files, tools, attachments)", "",
+                  "| Where | Item | Why | Link |", "|---|---|---|---|"]
+        for i in rows:
+            link = f"[open]({i['url']})" if i["url"] else ""
+            lines.append(f"| {cell(i['where'])} | {cell(i['title'] or '')} "
+                         f"| {cell(i['why'])} | {link} |")
+        lines.append("")
+    if ext:
+        lines += ["## External links the AI scrape couldn't capture", "",
+                  "Paywalls, login walls, or dead pages. To retry one, delete "
+                  "its entry from `output/.ai_manifest.json`.", "",
+                  "| Where | Link |", "|---|---|"]
+        lines += [f"| {cell(w)} | <{u}> |" for w, u in ext]
+        lines.append("")
+    text = "\n".join(lines) + "\n"
+    p = cdir / "Inaccessible.md"
+    # only rewrite on change, so publish doesn't re-copy it every run
+    if not p.exists() or p.read_text(encoding="utf-8") != text:
+        p.write_text(text, encoding="utf-8")
+    return len(rows) + len(ext)
+
+
+def report_inaccessible(cfg):
+    out_root = Path(cfg.get("output_dir", "output"))
+    for label in cfg["courses"]:
+        n = write_inaccessible(out_root, label)
+        print(f"  {label}: {n} inaccessible item(s)"
+              + (f" -> see {safe(label)}/Inaccessible.md" if n else ""))
 
 
 def derive_week1(course):
@@ -1096,6 +1212,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--week", type=int, help="only this week (default: everything)")
     run(week=ap.parse_args().week)
+    report_inaccessible(D2LClient().cfg)
 
 
 if __name__ == "__main__":

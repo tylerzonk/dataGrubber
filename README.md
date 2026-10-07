@@ -23,6 +23,10 @@ output/
       Calendar.md                every due date from the activities
                                  themselves, merged with the course
                                  calendar and deduped
+    Inaccessible.md              everything that couldn't be fetched (403s,
+                                 unreachable tools, failed attachments,
+                                 links the AI scrape couldn't capture),
+                                 with links to open yourself
   ARIN 460/
     ...
 ```

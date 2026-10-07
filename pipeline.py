@@ -176,6 +176,7 @@ def main():
     ai_scrape.run(client.cfg)
 
     stage(5, "publish")
+    grab_week.report_inaccessible(client.cfg)
     publish(client.cfg)
 
 
