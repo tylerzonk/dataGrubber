@@ -717,6 +717,63 @@ class CourseArchiver:
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.record(key, fp, [p])
 
+    # D2L availability types for a topic's StartDate / EndDate:
+    # 0 = access restricted, 1 = submission restricted (still readable),
+    # 2 = hidden. Posts 403 while access is restricted.
+    def posts_window_open(self, topic):
+        """False when the posts can't be read right now, so no request is
+        made: before an access-restricted start date, or on the skip list
+        (posts that were refused after the discussion closed)."""
+        now = dt.datetime.now(dt.timezone.utc)
+        start = parse_d2l_date(topic.get("StartDate"))
+        if start and now < start and \
+                topic.get("StartDateAvailabilityType") in (0, 2):
+            print(f"    posts open {start.astimezone(EASTERN):%Y-%m-%d}: "
+                  f"{topic['Name'][:50]}")
+            return False
+        skip = self.manifest.get("_posts_skip", {}).get(str(topic["TopicId"]))
+        # an instructor reopening the topic changes its dates -> try again
+        return not (skip and skip["dates"] == self.topic_dates(topic))
+
+    @staticmethod
+    def topic_dates(topic):
+        return [topic.get(k) for k in ("StartDate", "EndDate", "DueDate",
+                                       "UnlockStartDate", "UnlockEndDate")]
+
+    def topic_closes(self, topic):
+        """The latest of the topic's end date, due date, and the end of the
+        week it belongs to; None if none is known."""
+        ends = [parse_d2l_date(topic.get(k))
+                for k in ("EndDate", "DueDate", "UnlockEndDate")]
+        wk = self.activity_week["discussion"].get(topic["TopicId"])
+        if wk and self.week1:
+            d = self.week1 + dt.timedelta(days=7 * wk)  # next week's Wed
+            ends.append(dt.datetime(d.year, d.month, d.day, tzinfo=EASTERN))
+        ends = [e for e in ends if e]
+        return max(ends) if ends else None
+
+    def posts_denied(self, topic, e):
+        """Posts refused. After the discussion closed, the refusal is final:
+        put it on the skip list so later runs don't ask again. Before that
+        it is expected (not open yet, or hidden until your initial post)
+        and is simply retried next run."""
+        name = topic["Name"][:50]
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        closes = self.topic_closes(topic)
+        now = dt.datetime.now(dt.timezone.utc)
+        if code == 403 and closes and now > closes:
+            self.manifest.setdefault("_posts_skip", {})[
+                str(topic["TopicId"])] = {"dates": self.topic_dates(topic),
+                                          "closed": closes.isoformat()}
+            print(f"    posts closed {closes.astimezone(EASTERN):%Y-%m-%d}, "
+                  f"skipped from now on: {name}")
+        elif code == 403 and topic.get("MustPostToParticipate"):
+            print(f"    posts hidden until your initial post: {name}")
+        elif code == 403:
+            print(f"    posts not open yet (403), retried next run: {name}")
+        else:
+            print(f"    posts unavailable: {name}: {e}")
+
     def save_discussion_posts(self, forum, topic, ddir):
         """Everyone's posts for a topic — one markdown per top-level post
         with its replies nested inside, in <Name>/discussion_posts/, plus
@@ -725,12 +782,15 @@ class CourseArchiver:
         downloaded to discussion_posts/attachments/. Re-rendered whenever
         anyone posts or edits; your own reads don't count as changes."""
         from urllib.parse import quote
-        try:
-            posts = self.c.discussion_posts(
-                self.ou, forum["ForumId"], topic["TopicId"])
-        except Exception as e:
-            print(f"    posts unavailable: {topic['Name'][:40]}: {e}")
+        tid = topic["TopicId"]
+        if not self.posts_window_open(topic):
             return
+        try:
+            posts = self.c.discussion_posts(self.ou, forum["ForumId"], tid)
+        except Exception as e:
+            self.posts_denied(topic, e)
+            return
+        self.manifest.setdefault("_posts_skip", {}).pop(str(tid), None)
         posts = [p for p in posts if not p.get("IsDeleted")]
         if not posts:
             return
