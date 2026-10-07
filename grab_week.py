@@ -1144,8 +1144,8 @@ def write_inaccessible(out_root, label):
         lines.append("")
     if ext:
         lines += ["## External links the AI scrape couldn't capture", "",
-                  "Paywalls, login walls, or dead pages. To retry one, delete "
-                  "its entry from `output/.ai_manifest.json`.", "",
+                  "Paywalls, login walls, or dead pages. To retry them all, "
+                  "run `python pipeline.py --retry-failed`.", "",
                   "| Where | Link |", "|---|---|"]
         lines += [f"| {cell(w)} | <{u}> |" for w, u in ext]
         lines.append("")

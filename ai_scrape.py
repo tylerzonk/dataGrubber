@@ -38,7 +38,11 @@ Three providers (config "ai_scrape_provider"):
 
 Incremental: output/.ai_manifest.json records every (folder, url)
 handled. A link is reprocessed only if its saved file is deleted; failed
-links are recorded and skipped until their manifest entry is removed.
+links are recorded and skipped until retried with
+`python pipeline.py --retry-failed`. A batch where the agent wrote
+nothing at all (usage limit, outage, Ctrl+C) is NOT recorded: those
+links stay pending, and the stage stops early so the rest aren't burned
+through; the next run picks them all up.
 "ai_scrape_limit" caps how many links one run processes (0 = no cap).
 """
 
@@ -198,7 +202,7 @@ def agent_run(provider, cfg, out_root, pending, manifest, manifest_path):
     by_folder = {}
     for key, val in pending.items():
         by_folder.setdefault(key[0], []).append((key, val))
-    done = failed = 0
+    done = failed = stalls = 0
     for folder, items in by_folder.items():
         rel = folder.relative_to(out_root).as_posix()
         for i in range(0, len(items), BATCH):
@@ -224,11 +228,27 @@ def agent_run(provider, cfg, out_root, pending, manifest, manifest_path):
             except subprocess.TimeoutExpired:
                 print(f"    timed out after {TIMEOUT}s; whatever was "
                       "written is kept")
-            if not any((folder / t["fname"]).exists()
-                       for _, t in batch) and blurb.strip():
-                # whole batch came back empty: surface the agent's own
-                # words (rate limit, login, ...) instead of failing silently
-                print("    agent said: " + blurb.strip()[-300:])
+            if not any((folder / t["fname"]).exists() for _, t in batch):
+                # The prompt has the agent write a file for every link,
+                # even a substitute for a paywalled one, so an empty batch
+                # means the agent itself is down (usage limit, outage,
+                # crash), not the links. Leave them unrecorded so the next
+                # run retries them.
+                if blurb.strip():
+                    print("    agent said: " + blurb.strip()[-300:])
+                print("    nothing written -> left pending for the next run")
+                stalls += 1
+                if stalls >= 2 or re.search(
+                        r"limit|quota|credit|overloaded|execution error|"
+                        r"try again|capacity", blurb, re.I):
+                    print("  the agent looks unavailable (usage limit or "
+                          "outage) -> stopping the AI scrape here. Every "
+                          "link not yet fetched stays pending; rerun the "
+                          "pipeline once it's back.")
+                    manifest_path.write_text(json.dumps(manifest, indent=2))
+                    return done, failed
+                continue
+            stalls = 0
             for key, (mkey, t) in items[i:i + BATCH]:
                 ok = (folder / t["fname"]).exists()
                 manifest[mkey] = {
@@ -330,7 +350,7 @@ def api_run(cfg, out_root, pending, manifest, manifest_path):
 
 # ---------- driver ----------
 
-def run(cfg):
+def run(cfg, retry_failed=False):
     if not cfg.get("ai_scrape"):
         print("  disabled (config \"ai_scrape\": false)")
         return
@@ -345,6 +365,14 @@ def run(cfg):
     manifest = (json.loads(manifest_path.read_text())
                 if manifest_path.exists() else {})
     tasks = collect_links(out_root, cfg["courses"])
+    if retry_failed:
+        courses = {c.replace("/", "_") for c in cfg["courses"]}
+        drop = [k for k, v in manifest.items() if v.get("status") == "failed"
+                and k.split("/", 1)[0] in courses]
+        for k in drop:
+            del manifest[k]
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        print(f"  --retry-failed: {len(drop)} failed link(s) queued again")
 
     pending = {}
     for (folder, url), t in tasks.items():
@@ -369,4 +397,4 @@ def run(cfg):
         done, failed = agent_run(provider, cfg, out_root, pending,
                                  manifest, manifest_path)
     print(f"  ai scrape: {done} fetched, {failed} failed "
-          f"(failures are skipped until removed from .ai_manifest.json)")
+          f"(retry failures with: python pipeline.py --retry-failed)")

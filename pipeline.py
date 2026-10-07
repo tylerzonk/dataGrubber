@@ -152,6 +152,8 @@ def publish(cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--week", type=int, help="only this week (default: everything)")
+    ap.add_argument("--retry-failed", action="store_true",
+                    help="re-queue links the AI scrape marked failed")
     args = ap.parse_args()
 
     stage(1, "config")
@@ -173,7 +175,7 @@ def main():
 
     stage(4, "ai scrape")
     import ai_scrape
-    ai_scrape.run(client.cfg)
+    ai_scrape.run(client.cfg, retry_failed=args.retry_failed)
 
     stage(5, "publish")
     grab_week.report_inaccessible(client.cfg)
